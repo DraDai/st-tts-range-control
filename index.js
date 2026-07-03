@@ -84,7 +84,7 @@ function buildSpeechText(rangeMessages) {
 async function speakText(text) {
     const speakCommand = SlashCommandParser.commands.speak || SlashCommandParser.commands.tts || SlashCommandParser.commands.narrate;
     if (!speakCommand) {
-        toastr.warning('TTS command is not available. Enable the SillyTavern TTS extension first.');
+        toastr.warning('TTS 命令不可用。请先启用 SillyTavern 的 TTS 扩展。');
         return false;
     }
 
@@ -95,13 +95,13 @@ async function speakText(text) {
 async function speakRange(from, to) {
     const rangeMessages = getRangeMessages(from, to);
     if (!rangeMessages.length) {
-        toastr.info('No matching messages in that range.');
+        toastr.info('这个范围内没有可朗读的消息。');
         return '';
     }
 
     const text = buildSpeechText(rangeMessages);
     if (!text) {
-        toastr.info('Selected messages have no readable text.');
+        toastr.info('选中的消息没有可朗读文本。');
         return '';
     }
 
@@ -119,7 +119,7 @@ function stopSpeaking() {
         audio.pause();
         audio.currentTime = 0;
     });
-    toastr.info('Narration stopped.');
+    toastr.info('已停止朗读。');
 }
 
 function updateStatus() {
@@ -155,42 +155,42 @@ function createPanel() {
     const panel = $(`
         <div id="st_tts_range_panel" class="sttrc-panel sttrc-hidden">
             <div class="sttrc-header">
-                <span>TTS Range</span>
-                <button id="st_tts_range_close" class="menu_button fa-solid fa-xmark" title="Close"></button>
+                <span>朗读范围</span>
+                <button id="st_tts_range_close" class="menu_button fa-solid fa-xmark" title="关闭"></button>
             </div>
             <div class="sttrc-row">
-                <label for="st_tts_range_from">From</label>
+                <label for="st_tts_range_from">起始</label>
                 <input id="st_tts_range_from" class="text_pole" type="number" min="1" step="1">
-                <label for="st_tts_range_to">To</label>
+                <label for="st_tts_range_to">结束</label>
                 <input id="st_tts_range_to" class="text_pole" type="number" min="1" step="1">
             </div>
-            <div class="sttrc-total">Messages available: <span id="st_tts_range_total">0</span></div>
+            <div class="sttrc-total">可朗读消息数：<span id="st_tts_range_total">0</span></div>
             <label class="checkbox_label sttrc-check">
                 <input id="st_tts_range_include_user" type="checkbox">
-                <span>User messages</span>
+                <span>包含用户消息</span>
             </label>
             <label class="checkbox_label sttrc-check">
                 <input id="st_tts_range_include_character" type="checkbox">
-                <span>Character messages</span>
+                <span>包含角色消息</span>
             </label>
             <label class="checkbox_label sttrc-check">
                 <input id="st_tts_range_include_name" type="checkbox">
-                <span>Read speaker names</span>
+                <span>朗读说话人名字</span>
             </label>
             <div class="sttrc-actions">
-                <button id="st_tts_range_play" class="menu_button fa-solid fa-play" title="Narrate range"></button>
-                <button id="st_tts_range_latest" class="menu_button fa-solid fa-forward-step" title="Use latest message"></button>
-                <button id="st_tts_range_stop" class="menu_button fa-solid fa-stop" title="Stop narration"></button>
-                <button id="st_tts_range_refresh" class="menu_button fa-solid fa-rotate" title="Refresh count"></button>
+                <button id="st_tts_range_play" class="menu_button fa-solid fa-play" title="朗读范围"></button>
+                <button id="st_tts_range_first" class="menu_button sttrc-text-button" title="起始设为最开始">最开始</button>
+                <button id="st_tts_range_latest" class="menu_button sttrc-text-button" title="结束设为最新">最新</button>
+                <button id="st_tts_range_stop" class="menu_button fa-solid fa-stop" title="停止朗读"></button>
+                <button id="st_tts_range_refresh" class="menu_button fa-solid fa-rotate" title="刷新数量"></button>
             </div>
         </div>
     `);
-
     $('body').append(panel);
     $('#extensionsMenu').append(`
         <div id="st_tts_range_button" class="list-group-item flex-container flexGap5">
-            <div class="fa-solid fa-headphones-simple extensionsMenuExtensionButton" title="TTS Range Control"></div>
-            <span>TTS Range</span>
+            <div class="fa-solid fa-headphones-simple extensionsMenuExtensionButton" title="朗读范围控制"></div>
+            <span>朗读范围</span>
         </div>
     `);
 
@@ -198,10 +198,15 @@ function createPanel() {
     $('#st_tts_range_close').on('click', () => $('#st_tts_range_panel').addClass('sttrc-hidden'));
     $('#st_tts_range_refresh').on('click', updateStatus);
     $('#st_tts_range_stop').on('click', stopSpeaking);
+    $('#st_tts_range_first').on('click', () => {
+        const settings = getSettings();
+        settings.from = 1;
+        saveSettings();
+        updateStatus();
+    });
     $('#st_tts_range_latest').on('click', () => {
         const total = getNarratableMessages().length || 1;
         const settings = getSettings();
-        settings.from = total;
         settings.to = total;
         saveSettings();
         updateStatus();
@@ -232,20 +237,20 @@ function registerSlashCommands() {
         namedArgumentList: [
             SlashCommandNamedArgument.fromProps({
                 name: 'from',
-                description: 'First message number to narrate, starting at 1',
+                description: '要朗读的起始消息编号，从 1 开始',
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 isRequired: true,
             }),
             SlashCommandNamedArgument.fromProps({
                 name: 'to',
-                description: 'Last message number to narrate, starting at 1',
+                description: '要朗读的结束消息编号，从 1 开始',
                 typeList: [ARGUMENT_TYPE.NUMBER],
                 isRequired: true,
             }),
         ],
         helpString: `
-            <div>Narrate a range of messages in the current chat.</div>
-            <div>Message numbers start at 1 and skip hidden system messages.</div>
+            <div>朗读当前聊天中的指定消息范围。</div>
+            <div>消息编号从 1 开始，隐藏的 system 消息不会计入。</div>
             <div><strong>Example:</strong> <code>/tts-range from=3 to=8</code></div>
         `,
     }));
@@ -256,7 +261,7 @@ function registerSlashCommands() {
             stopSpeaking();
             return '';
         },
-        helpString: '<div>Stops current narration playback.</div>',
+        helpString: '<div>停止当前朗读。</div>',
     }));
 }
 
@@ -266,3 +271,12 @@ jQuery(() => {
     registerSlashCommands();
     updateStatus();
 });
+
+
+
+
+
+
+
+
+

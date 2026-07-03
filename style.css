@@ -70,3 +70,11 @@
     padding: 0;
     justify-content: center;
 }
+
+.sttrc-actions .sttrc-text-button {
+    width: auto;
+    min-width: 58px;
+    padding: 0 8px;
+    font-size: 12px;
+    white-space: nowrap;
+}
