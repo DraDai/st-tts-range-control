@@ -1,0 +1,13 @@
+{
+    "display_name": "TTS Range Control",
+    "loading_order": 99,
+    "requires": [],
+    "optional": [
+        "tts"
+    ],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Codex",
+    "version": "0.1.0",
+    "homePage": "https://github.com/SillyTavern/SillyTavern"
+}

@@ -1,0 +1,72 @@
+#st_tts_range_button {
+    cursor: pointer;
+}
+
+.sttrc-panel {
+    position: fixed;
+    right: 18px;
+    bottom: 86px;
+    z-index: 30000;
+    width: min(340px, calc(100vw - 24px));
+    padding: 12px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    background: var(--SmartThemeBlurTintColor);
+    color: var(--SmartThemeBodyColor);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+    backdrop-filter: blur(var(--SmartThemeBlurStrength));
+}
+
+.sttrc-hidden {
+    display: none;
+}
+
+.sttrc-header,
+.sttrc-row,
+.sttrc-actions,
+.sttrc-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sttrc-header {
+    justify-content: space-between;
+    margin-bottom: 10px;
+    font-weight: 700;
+}
+
+.sttrc-row {
+    margin-bottom: 8px;
+}
+
+.sttrc-row label {
+    min-width: 36px;
+}
+
+.sttrc-row input {
+    width: 72px;
+}
+
+.sttrc-total {
+    margin-bottom: 8px;
+    opacity: 0.85;
+}
+
+.sttrc-check {
+    margin: 6px 0;
+}
+
+.sttrc-actions {
+    justify-content: flex-end;
+    margin-top: 10px;
+}
+
+.sttrc-actions .menu_button,
+.sttrc-header .menu_button {
+    min-width: 32px;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    justify-content: center;
+}
