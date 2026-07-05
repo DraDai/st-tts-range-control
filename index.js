@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
 let activeRunId = 0;
 let isSpeakingRange = false;
 let isPaused = false;
+let currentMessageIndex = null;
 
 function getSettings() {
     extension_settings[EXTENSION_KEY] ??= {};
@@ -116,7 +117,12 @@ function splitLongText(text, maxLength = MAX_CHUNK_LENGTH) {
 }
 
 function buildSpeechQueue(rangeMessages) {
-    return rangeMessages.flatMap(({ message }) => splitLongText(buildMessageText(message)));
+    return rangeMessages.flatMap(({ message }, offset) => {
+        return splitLongText(buildMessageText(message)).map(text => ({
+            text,
+            messageIndex: offset,
+        }));
+    });
 }
 
 function getSpeakCommand() {
@@ -248,6 +254,7 @@ async function speakRange(from, to) {
     const runId = ++activeRunId;
     isSpeakingRange = true;
     isPaused = false;
+    currentMessageIndex = Math.min(from, to);
     stopNativePlaybackOnly();
     updatePlaybackButton();
     toastr.info(`开始逐段朗读，共 ${queue.length} 段。`);
@@ -257,8 +264,9 @@ async function speakRange(from, to) {
             if (runId !== activeRunId) {
                 break;
             }
+            currentMessageIndex = Math.min(from, to) + queue[i].messageIndex;
             $('#st_tts_range_progress').text(`${i + 1}/${queue.length}`);
-            const ok = await speakTextAndWait(queue[i], runId);
+            const ok = await speakTextAndWait(queue[i].text, runId);
             if (!ok) {
                 break;
             }
@@ -268,6 +276,7 @@ async function speakRange(from, to) {
         if (runId === activeRunId) {
             isSpeakingRange = false;
             isPaused = false;
+            currentMessageIndex = null;
             $('#st_tts_range_progress').text('完成');
             updatePlaybackButton();
             toastr.success(`已朗读第 ${Math.min(from, to)} 到第 ${Math.max(from, to)} 条消息。`);
@@ -290,6 +299,7 @@ function stopSpeaking(notify = true) {
     activeRunId++;
     isSpeakingRange = false;
     isPaused = false;
+    currentMessageIndex = null;
     stopNativePlaybackOnly();
     $('#st_tts_range_progress').text('已停止');
     updatePlaybackButton();
@@ -358,29 +368,28 @@ function readControls() {
     return settings;
 }
 
-async function jumpToMessage(index) {
+async function jumpStartToMessage(index) {
     const total = getNarratableMessages().length || 1;
     const target = Math.min(total, Math.max(1, index));
+    const settings = readControls();
     const shouldRestart = isSpeakingRange;
     if (shouldRestart) {
         stopSpeaking(false);
     }
 
-    const settings = getSettings();
     settings.from = target;
-    settings.to = target;
     saveSettings();
     updateStatus();
 
     if (shouldRestart) {
-        await speakRange(target, target);
+        await speakRange(settings.from, settings.to);
     }
 }
 
 async function shiftRange(delta) {
     const settings = readControls();
-    const anchor = delta > 0 ? Math.max(settings.from, settings.to) : Math.min(settings.from, settings.to);
-    await jumpToMessage(anchor + delta);
+    const anchor = currentMessageIndex ?? settings.from;
+    await jumpStartToMessage(anchor + delta);
 }
 
 function openPanel() {
