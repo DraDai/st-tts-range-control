@@ -286,14 +286,16 @@ function stopNativePlaybackOnly() {
     });
 }
 
-function stopSpeaking() {
+function stopSpeaking(notify = true) {
     activeRunId++;
     isSpeakingRange = false;
     isPaused = false;
     stopNativePlaybackOnly();
     $('#st_tts_range_progress').text('已停止');
     updatePlaybackButton();
-    toastr.info('已停止朗读。');
+    if (notify) {
+        toastr.info('已停止朗读。');
+    }
 }
 
 function updatePlaybackButton() {
@@ -336,8 +338,11 @@ function updateStatus() {
     settings.from = Math.min(normalizeIndex(settings.from, 1), count || 1);
     settings.to = Math.min(normalizeIndex(settings.to, count || 1), count || 1);
     $('#st_tts_range_total').text(String(count));
+    $('#st_tts_range_from, #st_tts_range_to').attr('max', count || 1);
     $('#st_tts_range_from').val(settings.from);
     $('#st_tts_range_to').val(settings.to || count || 1);
+    $('#st_tts_range_from_value').text(String(settings.from));
+    $('#st_tts_range_to_value').text(String(settings.to || count || 1));
     $('#st_tts_range_progress').text(isSpeakingRange ? $('#st_tts_range_progress').text() : '-');
     updatePreview();
     updatePlaybackButton();
@@ -353,18 +358,29 @@ function readControls() {
     return settings;
 }
 
-function shiftRange(delta) {
-    const settings = readControls();
+async function jumpToMessage(index) {
     const total = getNarratableMessages().length || 1;
-    const length = Math.abs(settings.to - settings.from);
-    const direction = settings.from <= settings.to ? 1 : -1;
-    const minStart = 1;
-    const maxStart = Math.max(1, total - length);
-    const start = Math.min(maxStart, Math.max(minStart, Math.min(settings.from, settings.to) + delta));
-    settings.from = direction > 0 ? start : start + length;
-    settings.to = direction > 0 ? start + length : start;
+    const target = Math.min(total, Math.max(1, index));
+    const shouldRestart = isSpeakingRange;
+    if (shouldRestart) {
+        stopSpeaking(false);
+    }
+
+    const settings = getSettings();
+    settings.from = target;
+    settings.to = target;
     saveSettings();
     updateStatus();
+
+    if (shouldRestart) {
+        await speakRange(target, target);
+    }
+}
+
+async function shiftRange(delta) {
+    const settings = readControls();
+    const anchor = delta > 0 ? Math.max(settings.from, settings.to) : Math.min(settings.from, settings.to);
+    await jumpToMessage(anchor + delta);
 }
 
 function openPanel() {
@@ -380,14 +396,14 @@ function createPanel() {
                 <button id="st_tts_range_close" class="menu_button fa-solid fa-xmark" title="关闭"></button>
             </div>
             <div class="sttrc-range-line">
-                <label for="st_tts_range_from">起始</label>
-                <input id="st_tts_range_from" class="text_pole" type="number" min="1" step="1">
+                <label for="st_tts_range_from">起始 <span id="st_tts_range_from_value">1</span></label>
+                <input id="st_tts_range_from" type="range" min="1" max="1" step="1">
                 <button id="st_tts_range_first" class="menu_button sttrc-text-button" title="起始设为最开始">最开始</button>
             </div>
             <div id="st_tts_range_from_preview" class="sttrc-preview"></div>
             <div class="sttrc-range-line">
-                <label for="st_tts_range_to">结束</label>
-                <input id="st_tts_range_to" class="text_pole" type="number" min="1" step="1">
+                <label for="st_tts_range_to">结束 <span id="st_tts_range_to_value">1</span></label>
+                <input id="st_tts_range_to" type="range" min="1" max="1" step="1">
                 <button id="st_tts_range_latest" class="menu_button sttrc-text-button" title="结束设为最新">最新</button>
             </div>
             <div id="st_tts_range_to_preview" class="sttrc-preview"></div>
