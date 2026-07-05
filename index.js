@@ -9,13 +9,11 @@ const MAX_CHUNK_LENGTH = 800;
 const DEFAULT_SETTINGS = {
     from: 1,
     to: 1,
-    includeUser: true,
-    includeCharacter: true,
-    includeName: true,
 };
 
 let activeRunId = 0;
 let isSpeakingRange = false;
+let isPaused = false;
 
 function getSettings() {
     extension_settings[EXTENSION_KEY] ??= {};
@@ -49,6 +47,19 @@ function stripHtml(text) {
     return node.textContent || node.innerText || '';
 }
 
+function getMessagePreview(index) {
+    const messages = getNarratableMessages();
+    const item = messages[index - 1];
+    if (!item) {
+        return '没有对应消息';
+    }
+
+    const { message } = item;
+    const name = String(message?.name || (message?.is_user ? '用户' : '角色')).trim();
+    const text = stripHtml(message?.extra?.display_text || message?.mes).replace(/\s+/g, ' ').trim();
+    return `${index}. ${name}: ${text.slice(0, 120)}${text.length > 120 ? '...' : ''}`;
+}
+
 function getRangeMessages(from, to) {
     const messages = getNarratableMessages();
     if (!messages.length) {
@@ -57,32 +68,11 @@ function getRangeMessages(from, to) {
 
     const start = Math.max(1, Math.min(from, to));
     const end = Math.min(messages.length, Math.max(from, to));
-    const settings = getSettings();
-
-    return messages.slice(start - 1, end).filter(({ message }) => {
-        if (message.is_user && !settings.includeUser) {
-            return false;
-        }
-        if (!message.is_user && !settings.includeCharacter) {
-            return false;
-        }
-        return true;
-    });
+    return messages.slice(start - 1, end);
 }
 
 function buildMessageText(message) {
-    const settings = getSettings();
-    const text = stripHtml(message?.extra?.display_text || message?.mes).trim();
-    if (!text) {
-        return '';
-    }
-
-    if (!settings.includeName) {
-        return text;
-    }
-
-    const name = String(message?.name || (message?.is_user ? 'User' : 'Assistant')).trim();
-    return `${name}: ${text}`;
+    return stripHtml(message?.extra?.display_text || message?.mes).trim();
 }
 
 function splitLongText(text, maxLength = MAX_CHUNK_LENGTH) {
@@ -153,6 +143,13 @@ function isAudioFinished(audio) {
     return audio.paused && audio.currentTime >= Math.max(0, audio.duration - 0.15);
 }
 
+async function waitWhilePaused(runId) {
+    while (isPaused && runId === activeRunId) {
+        await delay(250);
+    }
+    return runId === activeRunId;
+}
+
 async function waitForCurrentTtsAudio(runId, state, timeoutMs = 600000) {
     const start = Date.now();
     let sawActiveAudio = false;
@@ -161,6 +158,9 @@ async function waitForCurrentTtsAudio(runId, state, timeoutMs = 600000) {
 
     while (Date.now() - start < timeoutMs) {
         if (runId !== activeRunId) {
+            return false;
+        }
+        if (!(await waitWhilePaused(runId))) {
             return false;
         }
 
@@ -186,8 +186,6 @@ async function waitForCurrentTtsAudio(runId, state, timeoutMs = 600000) {
             idleSince = 0;
         }
 
-        // Very short clips can finish between polling ticks. Permit that only
-        // after TTS has produced audio and the dedicated TTS element has ended.
         if (!sawActiveAudio && sawGeneratedAudio && hasAudioSource && audio.ended) {
             idleSince ||= Date.now();
             if (Date.now() - idleSince > 750) {
@@ -249,7 +247,9 @@ async function speakRange(from, to) {
 
     const runId = ++activeRunId;
     isSpeakingRange = true;
+    isPaused = false;
     stopNativePlaybackOnly();
+    updatePlaybackButton();
     toastr.info(`开始逐段朗读，共 ${queue.length} 段。`);
 
     try {
@@ -267,7 +267,9 @@ async function speakRange(from, to) {
     } finally {
         if (runId === activeRunId) {
             isSpeakingRange = false;
+            isPaused = false;
             $('#st_tts_range_progress').text('完成');
+            updatePlaybackButton();
             toastr.success(`已朗读第 ${Math.min(from, to)} 到第 ${Math.max(from, to)} 条消息。`);
         }
     }
@@ -287,21 +289,58 @@ function stopNativePlaybackOnly() {
 function stopSpeaking() {
     activeRunId++;
     isSpeakingRange = false;
+    isPaused = false;
     stopNativePlaybackOnly();
     $('#st_tts_range_progress').text('已停止');
+    updatePlaybackButton();
     toastr.info('已停止朗读。');
+}
+
+function updatePlaybackButton() {
+    const button = $('#st_tts_range_play_pause');
+    if (!button.length) {
+        return;
+    }
+
+    button
+        .toggleClass('fa-play', !isSpeakingRange || isPaused)
+        .toggleClass('fa-pause', isSpeakingRange && !isPaused)
+        .attr('title', isSpeakingRange && !isPaused ? '暂停朗读' : '开始朗读');
+}
+
+function pauseSpeaking() {
+    const audio = getTtsAudioElement();
+    isPaused = true;
+    audio?.pause?.();
+    updatePlaybackButton();
+    $('#st_tts_range_progress').text('已暂停');
+}
+
+function resumeSpeaking() {
+    const audio = getTtsAudioElement();
+    isPaused = false;
+    audio?.play?.();
+    updatePlaybackButton();
+}
+
+function updatePreview() {
+    const from = normalizeIndex($('#st_tts_range_from').val(), getSettings().from);
+    const to = normalizeIndex($('#st_tts_range_to').val(), getSettings().to);
+    $('#st_tts_range_from_preview').text(getMessagePreview(from));
+    $('#st_tts_range_to_preview').text(getMessagePreview(to));
 }
 
 function updateStatus() {
     const settings = getSettings();
     const count = getNarratableMessages().length;
+    settings.from = Math.min(normalizeIndex(settings.from, 1), count || 1);
+    settings.to = Math.min(normalizeIndex(settings.to, count || 1), count || 1);
     $('#st_tts_range_total').text(String(count));
     $('#st_tts_range_from').val(settings.from);
     $('#st_tts_range_to').val(settings.to || count || 1);
-    $('#st_tts_range_include_user').prop('checked', Boolean(settings.includeUser));
-    $('#st_tts_range_include_character').prop('checked', Boolean(settings.includeCharacter));
-    $('#st_tts_range_include_name').prop('checked', Boolean(settings.includeName));
     $('#st_tts_range_progress').text(isSpeakingRange ? $('#st_tts_range_progress').text() : '-');
+    updatePreview();
+    updatePlaybackButton();
 }
 
 function readControls() {
@@ -309,12 +348,23 @@ function readControls() {
     const total = getNarratableMessages().length || 1;
     settings.from = Math.min(normalizeIndex($('#st_tts_range_from').val(), settings.from), total);
     settings.to = Math.min(normalizeIndex($('#st_tts_range_to').val(), settings.to || settings.from), total);
-    settings.includeUser = $('#st_tts_range_include_user').prop('checked');
-    settings.includeCharacter = $('#st_tts_range_include_character').prop('checked');
-    settings.includeName = $('#st_tts_range_include_name').prop('checked');
     saveSettings();
     updateStatus();
     return settings;
+}
+
+function shiftRange(delta) {
+    const settings = readControls();
+    const total = getNarratableMessages().length || 1;
+    const length = Math.abs(settings.to - settings.from);
+    const direction = settings.from <= settings.to ? 1 : -1;
+    const minStart = 1;
+    const maxStart = Math.max(1, total - length);
+    const start = Math.min(maxStart, Math.max(minStart, Math.min(settings.from, settings.to) + delta));
+    settings.from = direction > 0 ? start : start + length;
+    settings.to = direction > 0 ? start + length : start;
+    saveSettings();
+    updateStatus();
 }
 
 function openPanel() {
@@ -329,30 +379,24 @@ function createPanel() {
                 <span>朗读范围</span>
                 <button id="st_tts_range_close" class="menu_button fa-solid fa-xmark" title="关闭"></button>
             </div>
-            <div class="sttrc-row">
+            <div class="sttrc-range-line">
                 <label for="st_tts_range_from">起始</label>
                 <input id="st_tts_range_from" class="text_pole" type="number" min="1" step="1">
+                <button id="st_tts_range_first" class="menu_button sttrc-text-button" title="起始设为最开始">最开始</button>
+            </div>
+            <div id="st_tts_range_from_preview" class="sttrc-preview"></div>
+            <div class="sttrc-range-line">
                 <label for="st_tts_range_to">结束</label>
                 <input id="st_tts_range_to" class="text_pole" type="number" min="1" step="1">
+                <button id="st_tts_range_latest" class="menu_button sttrc-text-button" title="结束设为最新">最新</button>
             </div>
+            <div id="st_tts_range_to_preview" class="sttrc-preview"></div>
             <div class="sttrc-total">可朗读消息数：<span id="st_tts_range_total">0</span></div>
             <div class="sttrc-total">当前进度：<span id="st_tts_range_progress">-</span></div>
-            <label class="checkbox_label sttrc-check">
-                <input id="st_tts_range_include_user" type="checkbox">
-                <span>包含用户消息</span>
-            </label>
-            <label class="checkbox_label sttrc-check">
-                <input id="st_tts_range_include_character" type="checkbox">
-                <span>包含角色消息</span>
-            </label>
-            <label class="checkbox_label sttrc-check">
-                <input id="st_tts_range_include_name" type="checkbox">
-                <span>朗读说话人名字</span>
-            </label>
             <div class="sttrc-actions">
-                <button id="st_tts_range_play" class="menu_button fa-solid fa-play" title="朗读范围"></button>
-                <button id="st_tts_range_first" class="menu_button sttrc-text-button" title="起始设为最开始">最开始</button>
-                <button id="st_tts_range_latest" class="menu_button sttrc-text-button" title="结束设为最新">最新</button>
+                <button id="st_tts_range_prev" class="menu_button fa-solid fa-chevron-left" title="上一个对话"></button>
+                <button id="st_tts_range_play_pause" class="menu_button fa-solid fa-play" title="开始朗读"></button>
+                <button id="st_tts_range_next" class="menu_button fa-solid fa-chevron-right" title="下一个对话"></button>
                 <button id="st_tts_range_stop" class="menu_button fa-solid fa-stop" title="停止朗读"></button>
                 <button id="st_tts_range_refresh" class="menu_button fa-solid fa-rotate" title="刷新数量"></button>
             </div>
@@ -371,6 +415,8 @@ function createPanel() {
     $('#st_tts_range_close').on('click', () => $('#st_tts_range_panel').addClass('sttrc-hidden'));
     $('#st_tts_range_refresh').on('click', updateStatus);
     $('#st_tts_range_stop').on('click', stopSpeaking);
+    $('#st_tts_range_prev').on('click', () => shiftRange(-1));
+    $('#st_tts_range_next').on('click', () => shiftRange(1));
     $('#st_tts_range_first').on('click', () => {
         const settings = getSettings();
         settings.from = 1;
@@ -384,16 +430,22 @@ function createPanel() {
         saveSettings();
         updateStatus();
     });
-    $('#st_tts_range_play').on('click', async () => {
-        if (isSpeakingRange) {
-            stopSpeaking();
+    $('#st_tts_range_play_pause').on('click', async () => {
+        if (isSpeakingRange && !isPaused) {
+            pauseSpeaking();
+            return;
+        }
+        if (isSpeakingRange && isPaused) {
+            resumeSpeaking();
             return;
         }
         const settings = readControls();
         await speakRange(settings.from, settings.to);
     });
-    $('#st_tts_range_from, #st_tts_range_to, #st_tts_range_include_user, #st_tts_range_include_character, #st_tts_range_include_name')
-        .on('change', readControls);
+    $('#st_tts_range_from, #st_tts_range_to').on('input change', () => {
+        readControls();
+        updatePreview();
+    });
 }
 
 function registerSlashCommands() {

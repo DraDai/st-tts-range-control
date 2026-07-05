@@ -22,9 +22,8 @@
 }
 
 .sttrc-header,
-.sttrc-row,
-.sttrc-actions,
-.sttrc-check {
+.sttrc-range-line,
+.sttrc-actions {
     display: flex;
     align-items: center;
     gap: 8px;
@@ -36,16 +35,16 @@
     font-weight: 700;
 }
 
-.sttrc-row {
+.sttrc-range-line {
     margin-bottom: 8px;
 }
 
-.sttrc-row label {
+.sttrc-range-line label {
     min-width: 36px;
 }
 
-.sttrc-row input {
-    width: 72px;
+.sttrc-range-line input {
+    width: 92px;
 }
 
 .sttrc-total {
@@ -53,8 +52,18 @@
     opacity: 0.85;
 }
 
-.sttrc-check {
-    margin: 6px 0;
+.sttrc-preview {
+    min-height: 38px;
+    max-height: 72px;
+    overflow: hidden;
+    margin: 0 0 10px 44px;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: rgb(0 0 0 / 22%);
+    font-size: 12px;
+    line-height: 1.35;
+    opacity: 0.9;
 }
 
 .sttrc-actions {
@@ -73,7 +82,7 @@
 
 .sttrc-actions .sttrc-text-button {
     width: auto;
-    min-width: 58px;
+    min-width: 64px;
     padding: 0 8px;
     font-size: 12px;
     white-space: nowrap;
