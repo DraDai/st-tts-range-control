@@ -5,6 +5,7 @@ import { ARGUMENT_TYPE, SlashCommandNamedArgument } from '../../../slash-command
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 
 const EXTENSION_KEY = 'ttsRangeControl';
+const MAX_CHUNK_LENGTH = 800;
 const DEFAULT_SETTINGS = {
     from: 1,
     to: 1,
@@ -12,6 +13,9 @@ const DEFAULT_SETTINGS = {
     includeCharacter: true,
     includeName: true,
 };
+
+let activeRunId = 0;
+let isSpeakingRange = false;
 
 function getSettings() {
     extension_settings[EXTENSION_KEY] ??= {};
@@ -35,10 +39,7 @@ function getNarratableMessages() {
     return context.chat
         .map((message, chatIndex) => ({ message, chatIndex }))
         .filter(({ message }) => {
-            if (!message || message.is_system || message.mes === '...' || !String(message.mes ?? '').trim()) {
-                return false;
-            }
-            return true;
+            return message && !message.is_system && message.mes !== '...' && String(message.mes ?? '').trim();
         });
 }
 
@@ -69,27 +70,141 @@ function getRangeMessages(from, to) {
     });
 }
 
-function buildSpeechText(rangeMessages) {
+function buildMessageText(message) {
     const settings = getSettings();
-    return rangeMessages.map(({ message }) => {
-        const text = stripHtml(message?.extra?.display_text || message?.mes).trim();
-        if (!settings.includeName) {
-            return text;
-        }
-        const name = String(message?.name || (message?.is_user ? 'User' : 'Assistant')).trim();
-        return `${name}: ${text}`;
-    }).filter(Boolean).join('\n\n');
+    const text = stripHtml(message?.extra?.display_text || message?.mes).trim();
+    if (!text) {
+        return '';
+    }
+
+    if (!settings.includeName) {
+        return text;
+    }
+
+    const name = String(message?.name || (message?.is_user ? 'User' : 'Assistant')).trim();
+    return `${name}: ${text}`;
 }
 
-async function speakText(text) {
-    const speakCommand = SlashCommandParser.commands.speak || SlashCommandParser.commands.tts || SlashCommandParser.commands.narrate;
+function splitLongText(text, maxLength = MAX_CHUNK_LENGTH) {
+    const normalized = String(text ?? '').replace(/\r\n/g, '\n').trim();
+    if (normalized.length <= maxLength) {
+        return normalized ? [normalized] : [];
+    }
+
+    const parts = normalized
+        .split(/(?<=[。！？.!?])\s+|\n{2,}/u)
+        .map(x => x.trim())
+        .filter(Boolean);
+
+    const chunks = [];
+    let current = '';
+    for (const part of parts.length ? parts : [normalized]) {
+        if (part.length > maxLength) {
+            if (current) {
+                chunks.push(current);
+                current = '';
+            }
+            for (let i = 0; i < part.length; i += maxLength) {
+                chunks.push(part.slice(i, i + maxLength));
+            }
+            continue;
+        }
+
+        const next = current ? `${current}\n${part}` : part;
+        if (next.length > maxLength) {
+            chunks.push(current);
+            current = part;
+        } else {
+            current = next;
+        }
+    }
+
+    if (current) {
+        chunks.push(current);
+    }
+    return chunks;
+}
+
+function buildSpeechQueue(rangeMessages) {
+    return rangeMessages.flatMap(({ message }) => splitLongText(buildMessageText(message)));
+}
+
+function getSpeakCommand() {
+    return SlashCommandParser.commands.speak || SlashCommandParser.commands.tts || SlashCommandParser.commands.narrate;
+}
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getCandidateAudioElements() {
+    return [...document.querySelectorAll('audio')].filter(audio => {
+        return audio.src && !audio.src.includes('/sounds/silence.mp3');
+    });
+}
+
+async function waitForCurrentTtsAudio(runId, state, timeoutMs = 120000) {
+    const start = Date.now();
+    let sawActiveAudio = false;
+
+    while (Date.now() - start < timeoutMs) {
+        if (runId !== activeRunId) {
+            return false;
+        }
+
+        const audios = getCandidateAudioElements();
+        const activeAudio = audios.find(audio => !audio.paused && !audio.ended);
+        if (activeAudio) {
+            sawActiveAudio = true;
+        }
+
+        if (sawActiveAudio && audios.every(audio => audio.paused || audio.ended)) {
+            return true;
+        }
+
+        // Some very short clips can finish between polling intervals. If TTS has
+        // produced audio and completed the generation job, do not block forever.
+        if (state.audioReady && state.jobComplete && Date.now() - state.audioReadyAt > 3000) {
+            return true;
+        }
+
+        await delay(250);
+    }
+
+    return true;
+}
+
+async function speakTextAndWait(text, runId) {
+    const speakCommand = getSpeakCommand();
     if (!speakCommand) {
         toastr.warning('TTS 命令不可用。请先启用 SillyTavern 的 TTS 扩展。');
         return false;
     }
 
-    await speakCommand.callback({}, text);
-    return true;
+    const context = getContext();
+    const state = {
+        audioReady: false,
+        audioReadyAt: 0,
+        jobComplete: false,
+    };
+    const onAudioReady = () => {
+        state.audioReady = true;
+        state.audioReadyAt = Date.now();
+    };
+    const onJobComplete = () => {
+        state.jobComplete = true;
+    };
+
+    context.eventSource.on(context.eventTypes.TTS_AUDIO_READY, onAudioReady);
+    context.eventSource.on(context.eventTypes.TTS_JOB_COMPLETE, onJobComplete);
+    try {
+        await speakCommand.callback({}, text);
+        await waitForCurrentTtsAudio(runId, state);
+        return runId === activeRunId;
+    } finally {
+        context.eventSource.removeListener(context.eventTypes.TTS_AUDIO_READY, onAudioReady);
+        context.eventSource.removeListener(context.eventTypes.TTS_JOB_COMPLETE, onJobComplete);
+    }
 }
 
 async function speakRange(from, to) {
@@ -99,26 +214,54 @@ async function speakRange(from, to) {
         return '';
     }
 
-    const text = buildSpeechText(rangeMessages);
-    if (!text) {
+    const queue = buildSpeechQueue(rangeMessages);
+    if (!queue.length) {
         toastr.info('选中的消息没有可朗读文本。');
         return '';
     }
 
-    const ok = await speakText(text);
-    if (ok) {
-        toastr.success(`Narrating messages ${Math.min(from, to)}-${Math.max(from, to)}.`);
+    const runId = ++activeRunId;
+    isSpeakingRange = true;
+    stopNativePlaybackOnly();
+    toastr.info(`开始逐段朗读，共 ${queue.length} 段。`);
+
+    try {
+        for (let i = 0; i < queue.length; i++) {
+            if (runId !== activeRunId) {
+                break;
+            }
+            $('#st_tts_range_progress').text(`${i + 1}/${queue.length}`);
+            const ok = await speakTextAndWait(queue[i], runId);
+            if (!ok) {
+                break;
+            }
+            await delay(150);
+        }
+    } finally {
+        if (runId === activeRunId) {
+            isSpeakingRange = false;
+            $('#st_tts_range_progress').text('完成');
+            toastr.success(`已朗读第 ${Math.min(from, to)} 到第 ${Math.max(from, to)} 条消息。`);
+        }
     }
-    return text;
+
+    return queue.join('\n\n');
 }
 
-function stopSpeaking() {
+function stopNativePlaybackOnly() {
     cancelTtsPlay();
     window.speechSynthesis?.cancel?.();
     document.querySelectorAll('audio').forEach(audio => {
         audio.pause();
         audio.currentTime = 0;
     });
+}
+
+function stopSpeaking() {
+    activeRunId++;
+    isSpeakingRange = false;
+    stopNativePlaybackOnly();
+    $('#st_tts_range_progress').text('已停止');
     toastr.info('已停止朗读。');
 }
 
@@ -131,6 +274,7 @@ function updateStatus() {
     $('#st_tts_range_include_user').prop('checked', Boolean(settings.includeUser));
     $('#st_tts_range_include_character').prop('checked', Boolean(settings.includeCharacter));
     $('#st_tts_range_include_name').prop('checked', Boolean(settings.includeName));
+    $('#st_tts_range_progress').text(isSpeakingRange ? $('#st_tts_range_progress').text() : '-');
 }
 
 function readControls() {
@@ -165,6 +309,7 @@ function createPanel() {
                 <input id="st_tts_range_to" class="text_pole" type="number" min="1" step="1">
             </div>
             <div class="sttrc-total">可朗读消息数：<span id="st_tts_range_total">0</span></div>
+            <div class="sttrc-total">当前进度：<span id="st_tts_range_progress">-</span></div>
             <label class="checkbox_label sttrc-check">
                 <input id="st_tts_range_include_user" type="checkbox">
                 <span>包含用户消息</span>
@@ -186,6 +331,7 @@ function createPanel() {
             </div>
         </div>
     `);
+
     $('body').append(panel);
     $('#extensionsMenu').append(`
         <div id="st_tts_range_button" class="list-group-item flex-container flexGap5">
@@ -212,6 +358,10 @@ function createPanel() {
         updateStatus();
     });
     $('#st_tts_range_play').on('click', async () => {
+        if (isSpeakingRange) {
+            stopSpeaking();
+            return;
+        }
         const settings = readControls();
         await speakRange(settings.from, settings.to);
     });
@@ -249,7 +399,7 @@ function registerSlashCommands() {
             }),
         ],
         helpString: `
-            <div>朗读当前聊天中的指定消息范围。</div>
+            <div>逐段朗读当前聊天中的指定消息范围。</div>
             <div>消息编号从 1 开始，隐藏的 system 消息不会计入。</div>
             <div><strong>Example:</strong> <code>/tts-range from=3 to=8</code></div>
         `,
@@ -271,12 +421,3 @@ jQuery(() => {
     registerSlashCommands();
     updateStatus();
 });
-
-
-
-
-
-
-
-
-
