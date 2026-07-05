@@ -143,13 +143,30 @@ function getCandidateAudioElements() {
     });
 }
 
-async function waitForCurrentTtsAudio(runId, state, timeoutMs = 120000) {
+function isAudioFinished(audio) {
+    if (audio.ended) {
+        return true;
+    }
+
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+        return false;
+    }
+
+    return audio.paused && audio.currentTime >= Math.max(0, audio.duration - 0.15);
+}
+
+async function waitForCurrentTtsAudio(runId, state, timeoutMs = 600000) {
     const start = Date.now();
     let sawActiveAudio = false;
+    let sawGeneratedAudio = false;
 
     while (Date.now() - start < timeoutMs) {
         if (runId !== activeRunId) {
             return false;
+        }
+
+        if (state.audioReady || state.jobComplete) {
+            sawGeneratedAudio = true;
         }
 
         const audios = getCandidateAudioElements();
@@ -158,13 +175,14 @@ async function waitForCurrentTtsAudio(runId, state, timeoutMs = 120000) {
             sawActiveAudio = true;
         }
 
-        if (sawActiveAudio && audios.every(audio => audio.paused || audio.ended)) {
+        if (sawActiveAudio && audios.length && audios.every(isAudioFinished)) {
             return true;
         }
 
-        // Some very short clips can finish between polling intervals. If TTS has
-        // produced audio and completed the generation job, do not block forever.
-        if (state.audioReady && state.jobComplete && Date.now() - state.audioReadyAt > 3000) {
+        // If playback finished between polling ticks, the element can already be
+        // ended before we ever saw it active. Only allow this after TTS produced
+        // audio, and only when every candidate audio element is genuinely ended.
+        if (!sawActiveAudio && sawGeneratedAudio && audios.length && audios.every(audio => audio.ended)) {
             return true;
         }
 
