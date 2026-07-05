@@ -137,10 +137,8 @@ function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function getCandidateAudioElements() {
-    return [...document.querySelectorAll('audio')].filter(audio => {
-        return audio.src && !audio.src.includes('/sounds/silence.mp3');
-    });
+function getTtsAudioElement() {
+    return document.getElementById('tts_audio');
 }
 
 function isAudioFinished(audio) {
@@ -159,6 +157,7 @@ async function waitForCurrentTtsAudio(runId, state, timeoutMs = 600000) {
     const start = Date.now();
     let sawActiveAudio = false;
     let sawGeneratedAudio = false;
+    let idleSince = 0;
 
     while (Date.now() - start < timeoutMs) {
         if (runId !== activeRunId) {
@@ -169,21 +168,31 @@ async function waitForCurrentTtsAudio(runId, state, timeoutMs = 600000) {
             sawGeneratedAudio = true;
         }
 
-        const audios = getCandidateAudioElements();
-        const activeAudio = audios.find(audio => !audio.paused && !audio.ended);
-        if (activeAudio) {
+        const audio = getTtsAudioElement();
+        const hasAudioSource = audio?.src && !audio.src.includes('/sounds/silence.mp3');
+        const isActive = hasAudioSource && !audio.paused && !audio.ended;
+        if (isActive) {
             sawActiveAudio = true;
+            idleSince = 0;
         }
 
-        if (sawActiveAudio && audios.length && audios.every(isAudioFinished)) {
-            return true;
+        const isFinished = hasAudioSource && isAudioFinished(audio);
+        if (state.jobComplete && sawActiveAudio && isFinished) {
+            idleSince ||= Date.now();
+            if (Date.now() - idleSince > 750) {
+                return true;
+            }
+        } else if (idleSince && isActive) {
+            idleSince = 0;
         }
 
-        // If playback finished between polling ticks, the element can already be
-        // ended before we ever saw it active. Only allow this after TTS produced
-        // audio, and only when every candidate audio element is genuinely ended.
-        if (!sawActiveAudio && sawGeneratedAudio && audios.length && audios.every(audio => audio.ended)) {
-            return true;
+        // Very short clips can finish between polling ticks. Permit that only
+        // after TTS has produced audio and the dedicated TTS element has ended.
+        if (!sawActiveAudio && sawGeneratedAudio && hasAudioSource && audio.ended) {
+            idleSince ||= Date.now();
+            if (Date.now() - idleSince > 750) {
+                return true;
+            }
         }
 
         await delay(250);
