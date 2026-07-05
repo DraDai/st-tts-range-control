@@ -1,8 +1,9 @@
-import { cancelTtsPlay } from '../../../../script.js';
+import { cancelTtsPlay, name2 } from '../../../../script.js';
 import { extension_settings, getContext } from '../../../extensions.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
+import { EdgeTtsProvider } from '../../tts/edge.js';
 
 const EXTENSION_KEY = 'ttsRangeControl';
 const MAX_CHUNK_LENGTH = 800;
@@ -15,6 +16,9 @@ let activeRunId = 0;
 let isSpeakingRange = false;
 let isPaused = false;
 let currentMessageIndex = null;
+let directTtsProvider = null;
+let directTtsProviderName = null;
+let cachedAudioUrl = null;
 
 function getSettings() {
     extension_settings[EXTENSION_KEY] ??= {};
@@ -127,6 +131,157 @@ function buildSpeechQueue(rangeMessages) {
 
 function getSpeakCommand() {
     return SlashCommandParser.commands.speak || SlashCommandParser.commands.tts || SlashCommandParser.commands.narrate;
+}
+
+function getRangeAudioElement() {
+    let audio = document.getElementById('st_tts_range_audio');
+    if (!audio) {
+        audio = document.createElement('audio');
+        audio.id = 'st_tts_range_audio';
+        audio.autoplay = false;
+        document.body.appendChild(audio);
+    }
+    return audio;
+}
+
+function getActivePlaybackAudio() {
+    const rangeAudio = document.getElementById('st_tts_range_audio');
+    if (rangeAudio?.src && !rangeAudio.src.includes('/sounds/silence.mp3')) {
+        return rangeAudio;
+    }
+    return getTtsAudioElement();
+}
+
+function parseVoiceMapSetting(value) {
+    if (!value) {
+        return {};
+    }
+    if (typeof value === 'object') {
+        return value;
+    }
+    return String(value)
+        .split(',')
+        .map(x => x.trim().split(':').map(y => y.trim()))
+        .filter(x => x.length === 2)
+        .reduce((acc, [name, voice]) => {
+            acc[name] = voice;
+            return acc;
+        }, {});
+}
+
+async function getDirectTtsProvider() {
+    const providerName = extension_settings.tts?.currentProvider;
+    if (providerName !== 'Edge') {
+        return null;
+    }
+
+    if (directTtsProvider && directTtsProviderName === providerName) {
+        return directTtsProvider;
+    }
+
+    const provider = new EdgeTtsProvider();
+    await provider.loadSettings({ ...(extension_settings.tts?.[providerName] || {}) });
+    directTtsProvider = provider;
+    directTtsProviderName = providerName;
+    return provider;
+}
+
+function getDirectVoiceName() {
+    const providerName = extension_settings.tts?.currentProvider;
+    const providerSettings = extension_settings.tts?.[providerName] || {};
+    const voiceMap = parseVoiceMapSetting(providerSettings.voiceMap);
+    const defaultVoice = voiceMap['[Default Voice]'];
+    const characterVoice = voiceMap[name2];
+    const selectedVoice = characterVoice && characterVoice !== '[Default Voice]' ? characterVoice : defaultVoice;
+    return selectedVoice && selectedVoice !== 'disabled' ? selectedVoice : null;
+}
+
+async function generateCachedSegment(segment) {
+    const provider = await getDirectTtsProvider();
+    if (!provider) {
+        return null;
+    }
+
+    const voiceName = getDirectVoiceName();
+    if (!voiceName) {
+        return null;
+    }
+
+    const voice = await provider.getVoice(voiceName);
+    const response = await provider.generateTts(segment.text, voice.voice_id);
+    const blob = response instanceof Blob ? response : await response.blob();
+    return {
+        ...segment,
+        url: URL.createObjectURL(blob),
+    };
+}
+
+async function playCachedSegment(segment, runId) {
+    const audio = getRangeAudioElement();
+    if (cachedAudioUrl) {
+        URL.revokeObjectURL(cachedAudioUrl);
+        cachedAudioUrl = null;
+    }
+
+    cachedAudioUrl = segment.url;
+    audio.src = segment.url;
+    audio.playbackRate = Number(extension_settings.tts?.playback_rate || 1);
+    await audio.play();
+
+    await new Promise(resolve => {
+        let interval = null;
+        const finish = () => {
+            if (interval) {
+                clearInterval(interval);
+            }
+            audio.removeEventListener('ended', finish);
+            audio.removeEventListener('error', finish);
+            resolve();
+        };
+        audio.addEventListener('ended', finish);
+        audio.addEventListener('error', finish);
+        interval = setInterval(() => {
+            if (runId !== activeRunId) {
+                finish();
+            }
+        }, 250);
+    });
+
+    return runId === activeRunId;
+}
+
+async function speakPrefetchedQueue(queue, from, to, runId) {
+    let nextPromise = generateCachedSegment(queue[0]);
+
+    for (let i = 0; i < queue.length; i++) {
+        if (runId !== activeRunId) {
+            break;
+        }
+        if (!(await waitWhilePaused(runId))) {
+            break;
+        }
+
+        const cached = await nextPromise;
+        if (!cached) {
+            return false;
+        }
+
+        nextPromise = i + 1 < queue.length ? generateCachedSegment(queue[i + 1]) : null;
+        currentMessageIndex = Math.min(from, to) + cached.messageIndex;
+        $('#st_tts_range_progress').text(`${i + 1}/${queue.length}`);
+
+        const ok = await playCachedSegment(cached, runId);
+        URL.revokeObjectURL(cached.url);
+        if (cachedAudioUrl === cached.url) {
+            cachedAudioUrl = null;
+        }
+        if (!ok) {
+            break;
+        }
+        await delay(100);
+    }
+
+    return true;
 }
 
 function delay(ms) {
@@ -260,17 +415,26 @@ async function speakRange(from, to) {
     toastr.info(`开始逐段朗读，共 ${queue.length} 段。`);
 
     try {
-        for (let i = 0; i < queue.length; i++) {
-            if (runId !== activeRunId) {
-                break;
+        let prefetched = false;
+        try {
+            prefetched = await speakPrefetchedQueue(queue, from, to, runId);
+        } catch (error) {
+            console.warn('[TTS Range Control] Prefetch playback failed. Falling back to sequential TTS.', error);
+            prefetched = false;
+        }
+        if (!prefetched) {
+            for (let i = 0; i < queue.length; i++) {
+                if (runId !== activeRunId) {
+                    break;
+                }
+                currentMessageIndex = Math.min(from, to) + queue[i].messageIndex;
+                $('#st_tts_range_progress').text(`${i + 1}/${queue.length}`);
+                const ok = await speakTextAndWait(queue[i].text, runId);
+                if (!ok) {
+                    break;
+                }
+                await delay(150);
             }
-            currentMessageIndex = Math.min(from, to) + queue[i].messageIndex;
-            $('#st_tts_range_progress').text(`${i + 1}/${queue.length}`);
-            const ok = await speakTextAndWait(queue[i].text, runId);
-            if (!ok) {
-                break;
-            }
-            await delay(150);
         }
     } finally {
         if (runId === activeRunId) {
@@ -289,6 +453,10 @@ async function speakRange(from, to) {
 function stopNativePlaybackOnly() {
     cancelTtsPlay();
     window.speechSynthesis?.cancel?.();
+    if (cachedAudioUrl) {
+        URL.revokeObjectURL(cachedAudioUrl);
+        cachedAudioUrl = null;
+    }
     document.querySelectorAll('audio').forEach(audio => {
         audio.pause();
         audio.currentTime = 0;
@@ -321,7 +489,7 @@ function updatePlaybackButton() {
 }
 
 function pauseSpeaking() {
-    const audio = getTtsAudioElement();
+    const audio = getActivePlaybackAudio();
     isPaused = true;
     audio?.pause?.();
     updatePlaybackButton();
@@ -329,7 +497,7 @@ function pauseSpeaking() {
 }
 
 function resumeSpeaking() {
-    const audio = getTtsAudioElement();
+    const audio = getActivePlaybackAudio();
     isPaused = false;
     audio?.play?.();
     updatePlaybackButton();
